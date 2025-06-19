@@ -16,37 +16,37 @@ except ImportError:
     sys.exit('Tkinter not found; install python-tk')
 
 import os
-import sys as _sys
 import logging
 from scapy.all import get_if_list
 
 # Ensure dnspro.py is importable
-script_dir = os.path.dirname(os.path.abspath(__file__))
-if script_dir not in _sys.path:
-    _sys.path.insert(0, script_dir)
+dir_path = os.path.dirname(os.path.abspath(__file__))
+if dir_path not in sys.path:
+    sys.path.insert(0, dir_path)
 
-# Import the CLI spoofer module
+# Import DNS spoofer backend
 try:
     import imp
-    dns_mod = imp.load_source('dnspro', os.path.join(script_dir, 'dnspro.py'))
+    dns_mod = imp.load_source('dnspro', os.path.join(dir_path, 'dnspro.py'))
     DNSSpoofer = dns_mod.DNSSpoofer
     load_mapping = dns_mod.load_mapping
-except Exception as e:
+except Exception as err:
     tk.Tk().withdraw()
-    messagebox.showerror('Import Error', 'Failed to load dnspro.py: %s' % e)
-    _sys.exit(1)
+    messagebox.showerror('Import Error', 'Failed to load dnspro.py: %s' % err)
+    sys.exit(1)
 
-# Main GUI
 class GUIHandler(logging.Handler):
-    def __init__(self, text_widget):
-        logging.Handler.__init__(self)
-        self.text_widget = text_widget
+    """Redirect log records into a Tk Text widget."""
+    def __init__(self, widget):
+        super(GUIHandler, self).__init__()
+        self.widget = widget
+
     def emit(self, record):
         msg = self.format(record) + '\n'
         def append():
-            self.text_widget.insert(tk.END, msg)
-            self.text_widget.see(tk.END)
-        self.text_widget.after(0, append)
+            self.widget.insert(tk.END, msg)
+            self.widget.see(tk.END)
+        self.widget.after(0, append)
 
 class DNSGui(tk.Frame):
     BPF_PRESETS = [
@@ -63,62 +63,70 @@ class DNSGui(tk.Frame):
         self.logger = logging.getLogger()
         self.logger.setLevel(logging.INFO)
         self._build_widgets()
+        self.pack(padx=10, pady=10)
 
     def _build_widgets(self):
         row = 0
-        tk.Label(self, text='Interface:').grid(row=row, column=0, sticky='e')
+        # Interface selector\        tk.Label(self, text='Interface:').grid(row=row, column=0, sticky='e')
         self.iface_var = tk.StringVar()
-        self.iface_menu = tk.OptionMenu(self, self.iface_var, *get_if_list())
-        self.iface_menu.grid(row=row, column=1, sticky='w')
+        tk.OptionMenu(self, self.iface_var, *get_if_list()).grid(row=row, column=1, sticky='w')
 
+        # Mapping file entry
         row += 1
         tk.Label(self, text='Mapping file:').grid(row=row, column=0, sticky='e')
         self.map_path = tk.Entry(self, width=40)
-        self.map_path.grid(row=row, column=1)
+        self.map_path.grid(row=row, column=1, sticky='w')
         tk.Button(self, text='Browse...', command=self._browse_map).grid(row=row, column=2)
 
+        # Relay checkbox
         row += 1
         self.relay_var = tk.BooleanVar()
-        tk.Checkbutton(self, text='Relay unmatched queries', variable=self.relay_var).grid(row=row, columnspan=3, sticky='w')
+        tk.Checkbutton(self, text='Relay unmatched queries', variable=self.relay_var)
+            .grid(row=row, columnspan=3, sticky='w')
 
+        # Upstream DNS
         row += 1
         tk.Label(self, text='Upstream DNS:').grid(row=row, column=0, sticky='e')
         self.upstream = tk.Entry(self)
         self.upstream.insert(0, '8.8.8.8')
         self.upstream.grid(row=row, column=1, sticky='w')
 
+        # TTL
         row += 1
         tk.Label(self, text='TTL (secs):').grid(row=row, column=0, sticky='e')
         self.ttl = tk.Spinbox(self, from_=1, to=3600)
-        self.ttl.delete(0, tk.END)
-        self.ttl.insert(0, '300')
+        self.ttl.delete(0, tk.END); self.ttl.insert(0, '300')
         self.ttl.grid(row=row, column=1, sticky='w')
 
+        # BPF filter + presets
         row += 1
         tk.Label(self, text='BPF filter:').grid(row=row, column=0, sticky='e')
         self.bpf = tk.Entry(self)
         self.bpf.insert(0, self.BPF_PRESETS[0])
         self.bpf.grid(row=row, column=1, sticky='w')
-        tk.Button(self, text='⋯', width=2, command=self._choose_bpf).grid(row=row, column=2)
+        tk.Button(self, text='⋯', width=2, command=self._choose_bpf)
+            .grid(row=row, column=2, sticky='w')
 
+        # Log level
         row += 1
         tk.Label(self, text='Log level:').grid(row=row, column=0, sticky='e')
         self.log_level = tk.StringVar(value='INFO')
-        tk.OptionMenu(self, self.log_level, 'DEBUG', 'INFO', 'ERROR').grid(row=row, column=1, sticky='w')
+        tk.OptionMenu(self, self.log_level, 'DEBUG', 'INFO', 'ERROR')
+            .grid(row=row, column=1, sticky='w')
 
+        # Start/Stop buttons
         row += 1
         self.start_btn = tk.Button(self, text='Start', command=self._start)
         self.start_btn.grid(row=row, column=0)
         self.stop_btn = tk.Button(self, text='Stop', command=self._stop, state='disabled')
         self.stop_btn.grid(row=row, column=1)
 
+        # Log output box
         row += 1
         tk.Label(self, text='Log output:').grid(row=row, columnspan=3)
         row += 1
         self.log_text = tk.Text(self, height=15, width=70)
         self.log_text.grid(row=row, columnspan=3)
-
-        self.grid(padx=10, pady=10)
 
     def _browse_map(self):
         path = filedialog.askopenfilename(filetypes=[('YAML','*.yml;*.yaml'),('All','*.*')])
@@ -126,33 +134,29 @@ class DNSGui(tk.Frame):
             self.map_path.delete(0, tk.END)
             self.map_path.insert(0, path)
 
-        def _choose_bpf(self):
-        # Open a small dialog to pick from presets or enter custom filter
+    def _choose_bpf(self):
         dlg = tk.Toplevel(self)
         dlg.title('Select BPF Preset')
-        tk.Label(dlg, text='Double-click a preset to select it or edit below:').pack(padx=10, pady=(10,0))
-        lb = tk.Listbox(dlg, height=len(self.BPF_PRESETS), width=40)
-        for p in self.BPF_PRESETS:
-            lb.insert(tk.END, p)
-        lb.pack(padx=10, pady=5)
-        entry = tk.Entry(dlg, width=40)
+        tk.Label(dlg, text='Double-click a preset to load it or edit below:').pack(padx=10, pady=5)
+        lb = tk.Listbox(dlg, height=len(self.BPF_PRESETS), width=50)
+        for preset in self.BPF_PRESETS:
+            lb.insert(tk.END, preset)
+        lb.pack(padx=10)
+        entry = tk.Entry(dlg, width=50)
         entry.insert(0, self.bpf.get())
-        entry.pack(padx=10, pady=(0,10))
-        button_frame = tk.Frame(dlg)
-        button_frame.pack(pady=(0,10))
-        def on_select(evt):
+        entry.pack(padx=10, pady=5)
+        def on_double(evt):
             sel = lb.get(lb.curselection())
             entry.delete(0, tk.END)
             entry.insert(0, sel)
-        lb.bind('<Double-Button-1>', on_select)
-        def on_ok():
-            self.bpf.delete(0, tk.END)
-            self.bpf.insert(0, entry.get())
-            dlg.destroy()
-        tk.Button(button_frame, text='OK', command=on_ok).pack(side='left', padx=5)
-        tk.Button(button_frame, text='Cancel', command=dlg.destroy).pack(side='left')
+        lb.bind('<Double-Button-1>', on_double)
+        btn_frame = tk.Frame(dlg)
+        btn_frame.pack(pady=5)
+        tk.Button(btn_frame, text='OK', command=lambda: [self.bpf.delete(0,tk.END), self.bpf.insert(0,entry.get()), dlg.destroy()]).pack(side='left', padx=5)
+        tk.Button(btn_frame, text='Cancel', command=dlg.destroy).pack(side='left')
 
     def _start(self):
+        # Reset log handler
         if self.log_handler:
             self.logger.removeHandler(self.log_handler)
         self.log_text.delete('1.0', tk.END)
@@ -162,22 +166,28 @@ class DNSGui(tk.Frame):
         self.log_handler.setFormatter(logging.Formatter('%(asctime)s %(message)s'))
         self.logger.addHandler(self.log_handler)
 
+        # Validate inputs
         iface = self.iface_var.get()
         if not iface:
-            messagebox.showerror('Error','Select an interface')
+            messagebox.showerror('Error', 'Select an interface')
             return
         mapfile = self.map_path.get()
         if not mapfile:
-            messagebox.showerror('Error','Select a mapping file')
+            messagebox.showerror('Error', 'Select a mapping file')
             return
         try:
             mapping = load_mapping(mapfile)
-        except Exception as e:
-            messagebox.showerror('Mapping Error', str(e)); return
+        except Exception as exc:
+            messagebox.showerror('Mapping Error', str(exc))
+            return
 
-        self.spoofer = DNSSpoofer(iface=iface, mapping=mapping,
-                                  upstream=self.upstream.get(), relay=self.relay_var.get(),
-                                  ttl=int(self.ttl.get()), bpf=self.bpf.get() or None)
+        # Start spoofing thread
+        self.spoofer = DNSSpoofer(iface=iface,
+                                  mapping=mapping,
+                                  upstream=self.upstream.get(),
+                                  relay=self.relay_var.get(),
+                                  ttl=int(self.ttl.get()),
+                                  bpf=self.bpf.get())
         self.spoofer.start()
         self.start_btn.config(state='disabled')
         self.stop_btn.config(state='normal')
@@ -186,7 +196,7 @@ class DNSGui(tk.Frame):
     def _stop(self):
         if self.spoofer:
             self.spoofer.stop()
-            self.logger.info('Stopping')
+            self.logger.info('Stopped')
             self.spoofer = None
         self.start_btn.config(state='normal')
         self.stop_btn.config(state='disabled')
@@ -194,4 +204,4 @@ class DNSGui(tk.Frame):
 if __name__ == '__main__':
     root = tk.Tk()
     app = DNSGui(master=root)
-    app.mainloop()
+    root.mainloop()
