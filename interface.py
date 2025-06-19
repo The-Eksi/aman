@@ -48,6 +48,8 @@ class MitmGui(tk.Frame):
         self.logger = logging.getLogger(); self.logger.setLevel(logging.INFO)
         self.log_handler = None
         self.arp_mgr = PoisonManager()
+        # run mode: arp, dns, both
+        self.run_mode = tk.StringVar(value='both')
         self._build_widgets()
         self._bind_events()
 
