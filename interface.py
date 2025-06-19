@@ -1,9 +1,8 @@
-#!/usr/bin/env python
+#!/usr/bin/env python2
 # -*- coding: utf-8 -*-
 """
-DNS Spoofer GUI (Python 2.7 & Python 3.x compatibility)
+DNS Spoofer GUI (Python 2.7 only)
 Provides a Tkinter-based interface to the local dns.py DNS spoofing tool.
-
 Requires root privileges (e.g. sudo) to run.
 """
 import sys
@@ -11,42 +10,36 @@ import threading
 import logging
 import yaml
 
-# Tkinter compatibility for Python2 & Python3
-try:
-    import Tkinter as tk
-    import tkFileDialog as filedialog
-    import tkMessageBox as messagebox
-except ImportError:
-    import tkinter as tk
-    from tkinter import filedialog, messagebox
+# Tkinter imports for Python2
+import Tkinter as tk
+import tkFileDialog as filedialog
+import tkMessageBox as messagebox
 
 # Scapy interface enumeration
 from scapy.all import get_if_list
 
-# Import the local DNS spoofer module (dns.py) without colliding with external 'dns' packages
-import os, sys
+# Locate local dns.py module
+import os
 script_dir = os.path.dirname(os.path.abspath(__file__))
 dns_path = os.path.join(script_dir, 'dns.py')
-if dns_path not in sys.path:
-    # ensure local directory on path for direct import
-    if script_dir not in sys.path:
-        sys.path.insert(0, script_dir)
+if script_dir not in sys.path:
+    sys.path.insert(0, script_dir)
 
+# Load local dns.py via imp
 try:
-    # Try import local dns module
-    import importlib.machinery
-    loader = importlib.machinery.SourceFileLoader('local_dns', dns_path)
-    dns_mod = loader.load_module()
-    DNSSpoofer = dns_mod.DNSSpoofer
-    load_mapping = dns_mod.load_mapping
+    import imp
+    dns_mod = imp.load_source('local_dns', dns_path)
 except Exception as e:
-    messagebox.showerror("Import Error", f"Failed to load dns.py: {e}")
+    messagebox.showerror("Import Error", "Failed to load dns.py: %s" % e)
     sys.exit(1)
+
+DNSSpoofer = dns_mod.DNSSpoofer
+load_mapping = dns_mod.load_mapping
 
 class GUIHandler(logging.Handler):
     """Custom logging handler to redirect logs to a Tkinter Text widget."""
     def __init__(self, text_widget):
-        super(GUIHandler, self).__init__()
+        logging.Handler.__init__(self)
         self.text_widget = text_widget
 
     def emit(self, record):
@@ -58,7 +51,7 @@ class GUIHandler(logging.Handler):
 
 class DNSGui(tk.Frame):
     def __init__(self, master=None):
-        super(DNSGui, self).__init__(master)
+        tk.Frame.__init__(self, master)
         master.title("DNS Spoofer GUI")
         self.spoofer = None
         self._build_widgets()
@@ -100,7 +93,8 @@ class DNSGui(tk.Frame):
 
         row += 1
         tk.Label(self, text="Log level:").grid(row=row, column=0, sticky='e')
-        self.log_level = tk.StringVar(value='INFO')
+        self.log_level = tk.StringVar()
+        self.log_level.set('INFO')
         tk.OptionMenu(self, self.log_level, 'DEBUG', 'INFO', 'ERROR').grid(row=row, column=1, sticky='w')
 
         row += 1
@@ -133,9 +127,7 @@ class DNSGui(tk.Frame):
             messagebox.showerror("Error", "Please select a YAML mapping file.")
             return
         try:
-            from pathlib import Path
-            # load_mapping expects a Path object
-            mapping = load_mapping(Path(mapfile))
+            mapping = load_mapping(mapfile)
         except Exception as e:
             messagebox.showerror("Mapping Error", str(e))
             return
