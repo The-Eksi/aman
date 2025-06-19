@@ -2,7 +2,6 @@ import Tkinter as tk
 import ttk
 import threading
 import subprocess
-import sys
 from scapy.all import get_if_list
 
 class SSLStripUI(tk.Tk):
@@ -30,11 +29,15 @@ class SSLStripUI(tk.Tk):
         self.hosts_entry = tk.Entry(self)
         self.hosts_entry.grid(row=2, column=1, padx=5, pady=5)
 
-        # Verbose / Quiet
+        # Verbose / Quiet (mutually exclusive)
         self.verbose_var = tk.BooleanVar()
         self.quiet_var = tk.BooleanVar()
-        tk.Checkbutton(self, text="Verbose", variable=self.verbose_var).grid(row=3, column=0)
-        tk.Checkbutton(self, text="Quiet", variable=self.quiet_var).grid(row=3, column=1)
+        vb = tk.Checkbutton(self, text="Verbose (-v)", variable=self.verbose_var,
+                            command=self.on_verbose_toggle)
+        vb.grid(row=3, column=0)
+        qt = tk.Checkbutton(self, text="Quiet (-q)", variable=self.quiet_var,
+                            command=self.on_quiet_toggle)
+        qt.grid(row=3, column=1)
 
         # Buttons
         self.start_btn = tk.Button(self, text="Start", command=self.start_strip)
@@ -48,6 +51,16 @@ class SSLStripUI(tk.Tk):
         scrollbar = tk.Scrollbar(self, command=self.log_text.yview)
         scrollbar.grid(row=5, column=2, sticky='nsew')
         self.log_text['yscrollcommand'] = scrollbar.set
+
+    def on_verbose_toggle(self):
+        # Ensure verbose and quiet are mutually exclusive
+        if self.verbose_var.get():
+            self.quiet_var.set(False)
+
+    def on_quiet_toggle(self):
+        # Ensure quiet and verbose are mutually exclusive
+        if self.quiet_var.get():
+            self.verbose_var.set(False)
 
     def start_strip(self):
         iface = self.iface_var.get().strip()
@@ -66,10 +79,10 @@ class SSLStripUI(tk.Tk):
             args += ['--hosts', hosts]
         if verbose:
             args.append('-v')
-        if quiet:
+        elif quiet:
             args.append('-q')
 
-        self._log("Starting: {}\n".format(' '.join(args)))
+        self._log(f"Starting: {' '.join(args)}\n")
         self.start_btn.config(state='disabled')
         self.stop_btn.config(state='normal')
 
