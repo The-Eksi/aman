@@ -11,6 +11,7 @@ try:
     import Tkinter as tk
     import tkFileDialog as filedialog
     import tkMessageBox as messagebox
+    import tkSimpleDialog as simpledialog
 except ImportError:
     sys.exit('Tkinter not found; install python-tk')
 
@@ -48,15 +49,20 @@ class GUIHandler(logging.Handler):
         self.text_widget.after(0, append)
 
 class DNSGui(tk.Frame):
+    BPF_PRESETS = [
+        'udp or tcp port 53',
+        'net 10.0.0.0/8 and udp port 53',
+        'dst port 53 and src host 192.168.1.100',
+    ]
+
     def __init__(self, master=None):
         tk.Frame.__init__(self, master)
         master.title('DNS Spoofer GUI')
         self.spoofer = None
         self.log_handler = None
-        self._build_widgets()
-        # Set up logging once
         self.logger = logging.getLogger()
         self.logger.setLevel(logging.INFO)
+        self._build_widgets()
 
     def _build_widgets(self):
         row = 0
@@ -91,7 +97,9 @@ class DNSGui(tk.Frame):
         row += 1
         tk.Label(self, text='BPF filter:').grid(row=row, column=0, sticky='e')
         self.bpf = tk.Entry(self)
+        self.bpf.insert(0, self.BPF_PRESETS[0])
         self.bpf.grid(row=row, column=1, sticky='w')
+        tk.Button(self, text='⋯', width=2, command=self._choose_bpf).grid(row=row, column=2)
 
         row += 1
         tk.Label(self, text='Log level:').grid(row=row, column=0, sticky='e')
@@ -118,16 +126,20 @@ class DNSGui(tk.Frame):
             self.map_path.delete(0, tk.END)
             self.map_path.insert(0, path)
 
+    def _choose_bpf(self):
+        choice = simpledialog.askstring('BPF Presets',
+            'Select or edit filter:',
+            initialvalue=self.bpf.get())
+        if choice:
+            self.bpf.delete(0, tk.END)
+            self.bpf.insert(0, choice)
+
     def _start(self):
-        # prevent duplicate handlers
         if self.log_handler:
             self.logger.removeHandler(self.log_handler)
-        # clear log text
         self.log_text.delete('1.0', tk.END)
-        # set level
         level = getattr(logging, self.log_level.get(), logging.INFO)
         self.logger.setLevel(level)
-        # add handler
         self.log_handler = GUIHandler(self.log_text)
         self.log_handler.setFormatter(logging.Formatter('%(asctime)s %(message)s'))
         self.logger.addHandler(self.log_handler)
