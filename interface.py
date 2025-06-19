@@ -6,7 +6,6 @@ from scapy.all import get_if_list
 
 class SSLStripUI(tk.Tk):
     def __init__(self):
-        # Initialize base Tk class
         tk.Tk.__init__(self)
         self.title("SSL Strip Tool UI")
         self.process = None
@@ -32,12 +31,10 @@ class SSLStripUI(tk.Tk):
         # Verbose / Quiet (mutually exclusive)
         self.verbose_var = tk.BooleanVar()
         self.quiet_var = tk.BooleanVar()
-        vb = tk.Checkbutton(self, text="Verbose (-v)", variable=self.verbose_var,
-                            command=self.on_verbose_toggle)
-        vb.grid(row=3, column=0)
-        qt = tk.Checkbutton(self, text="Quiet (-q)", variable=self.quiet_var,
-                            command=self.on_quiet_toggle)
-        qt.grid(row=3, column=1)
+        tk.Checkbutton(self, text="Verbose (-v)", variable=self.verbose_var,
+                       command=self.on_verbose_toggle).grid(row=3, column=0)
+        tk.Checkbutton(self, text="Quiet (-q)", variable=self.quiet_var,
+                       command=self.on_quiet_toggle).grid(row=3, column=1)
 
         # Buttons
         self.start_btn = tk.Button(self, text="Start", command=self.start_strip)
@@ -53,12 +50,10 @@ class SSLStripUI(tk.Tk):
         self.log_text['yscrollcommand'] = scrollbar.set
 
     def on_verbose_toggle(self):
-        # Ensure verbose and quiet are mutually exclusive
         if self.verbose_var.get():
             self.quiet_var.set(False)
 
     def on_quiet_toggle(self):
-        # Ensure quiet and verbose are mutually exclusive
         if self.quiet_var.get():
             self.verbose_var.set(False)
 
@@ -82,7 +77,8 @@ class SSLStripUI(tk.Tk):
         elif quiet:
             args.append('-q')
 
-        self._log(f"Starting: {' '.join(args)}\n")
+        cmd = ' '.join(args)
+        self._log("Starting: {}\n".format(cmd))
         self.start_btn.config(state='disabled')
         self.stop_btn.config(state='normal')
 
