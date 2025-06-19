@@ -92,7 +92,8 @@ class ArpSpoofUI(tk.Tk):
             self._log("Error: CIDR and Gateway are required for flood mode.\n")
             return
 
-        args = ['sudo', 'python2', 'arp_poisoner27.py', '--iface', iface, '--mode', mode, '--interval', interval]
+        # adjust to use arp.py from latest script
+        args = ['sudo', 'python2', 'arp.py', '-i', iface, '--mode', mode, '--interval', interval]
         if mode in ('pair', 'silent'):
             args += ['--victims', victims, '--gateway', gateway]
         else:
@@ -108,7 +109,11 @@ class ArpSpoofUI(tk.Tk):
                 line = self.process.stdout.readline()
                 if not line:
                     break
-                self._log(line)
+                # ensure unicode display
+                try:
+                    self._log(line.decode('utf-8'))
+                except:
+                    self._log(str(line))
             self._on_process_end()
 
         thread = threading.Thread(target=run_process)
