@@ -53,7 +53,22 @@ class MitmGui(tk.Frame):
         self._build_widgets()
         self._bind_events()
 
+    def _toggle_sections(self):
+        """Enable/disable ARP vs DNS widgets based on Run mode."""
+        rm = self.run_mode.get()
+        arp_widgets = [self.arp_mode, self.arp_victims, self.arp_gateway, self.arp_cidr, self.arp_interval]
+        dns_widgets = [self.map_path, self.relay_var, self.upstream, self.ttl, self.bpf]
+        if rm == 'arp':
+            for w in arp_widgets: w.config(state='normal')
+            for w in dns_widgets: w.config(state='disabled')
+        elif rm == 'dns':
+            for w in arp_widgets: w.config(state='disabled')
+            for w in dns_widgets: w.config(state='normal')
+        else:
+            for w in arp_widgets + dns_widgets: w.config(state='normal')
+
     def _build_widgets(self):
+        r = 0(self)
         r = 0
         # Interface & Run Mode
         tk.Label(self, text='Interface:').grid(row=r, column=0, sticky='e')
