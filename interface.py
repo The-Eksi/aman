@@ -117,7 +117,7 @@ class DNSGui(tk.Frame):
         self.log_text.grid(row=r, columnspan=3)
 
     def _browse_map(self):
-        p = filedialog.askopenfilename(filetypes=[('YAML','*.yml')])
+        p = filedialog.askopenfilename(filetypes=[('YAML','*.yml'),('All files','*.*')])
         if p:
             self.map_path.delete(0,tk.END)
             self.map_path.insert(0,p)
