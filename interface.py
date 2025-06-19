@@ -16,8 +16,12 @@ class ArpFrame(tk.Frame):
 
     def launch_arp(self):
         path = os.path.join(SCRIPT_DIR, 'arpui.py')
-        threading.Thread(target=lambda: subprocess.call(['sudo', 'python2', path]),
-                         daemon=True).start()
+        # Launch subprocess in daemon thread
+        def runner():
+            subprocess.call(['sudo', 'python2', path])
+        t = threading.Thread(target=runner)
+        t.setDaemon(True)
+        t.start()
 
 class DNSFrame(tk.Frame):
     def __init__(self, master=None):
@@ -27,8 +31,11 @@ class DNSFrame(tk.Frame):
 
     def launch_dns(self):
         path = os.path.join(SCRIPT_DIR, 'dnsui.py')
-        threading.Thread(target=lambda: subprocess.call(['sudo', 'python2', path]),
-                         daemon=True).start()
+        def runner():
+            subprocess.call(['sudo', 'python2', path])
+        t = threading.Thread(target=runner)
+        t.setDaemon(True)
+        t.start()
 
 class SSLFrame(tk.Frame):
     def __init__(self, master=None):
@@ -38,8 +45,11 @@ class SSLFrame(tk.Frame):
 
     def launch_ssl(self):
         path = os.path.join(SCRIPT_DIR, 'sslui.py')
-        threading.Thread(target=lambda: subprocess.call(['sudo', 'python2', path]),
-                         daemon=True).start()
+        def runner():
+            subprocess.call(['sudo', 'python2', path])
+        t = threading.Thread(target=runner)
+        t.setDaemon(True)
+        t.start()
 
 class CombinedUI(tk.Tk):
     def __init__(self):
