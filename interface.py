@@ -54,6 +54,15 @@ class MitmGui(tk.Frame):
     def _build_widgets(self):
         r = 0
         # Interface
+        tk.Label(self, text='Run mode:').grid(row=r, column=2, sticky='e')
+        self.run_mode = tk.StringVar(value='both')
+        modes = [('ARP only','arp'), ('DNS only','dns'), ('Both','both')]
+        col = 3
+        for txt,val in modes:
+            tk.Radiobutton(self, text=txt, variable=self.run_mode, value=val, command=self._toggle_sections).grid(row=r, column=col, sticky='w')
+            col += 1
+
+# ARP Settings
         tk.Label(self, text='Interface:').grid(row=r, column=0, sticky='e')
         self.iface_var = tk.StringVar()
         tk.OptionMenu(self, self.iface_var, *get_if_list()).grid(row=r, column=1, sticky='w')
