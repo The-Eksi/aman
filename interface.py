@@ -55,23 +55,20 @@ class MitmGui(tk.Frame):
 
     def _build_widgets(self):
         r = 0
-        # Interface
-        tk.Label(self, text='Run mode:').grid(row=r, column=2, sticky='e')
-        self.run_mode = tk.StringVar(value='both')
-        modes = [('ARP only','arp'), ('DNS only','dns'), ('Both','both')]
-        col = 3
-        for txt,val in modes:
-            tk.Radiobutton(self, text=txt, variable=self.run_mode, value=val, command=self._toggle_sections).grid(row=r, column=col, sticky='w')
-            col += 1
-
-# ARP Settings
+        # Interface & Run Mode
         tk.Label(self, text='Interface:').grid(row=r, column=0, sticky='e')
         self.iface_var = tk.StringVar()
         tk.OptionMenu(self, self.iface_var, *get_if_list()).grid(row=r, column=1, sticky='w')
+        tk.Label(self, text='Run mode:').grid(row=r, column=2, sticky='e')
+        modes = [('ARP only','arp'),('DNS only','dns'),('Both','both')]
+        c = 3
+        for txt,val in modes:
+            tk.Radiobutton(self, text=txt, variable=self.run_mode, value=val, command=self._toggle_sections).grid(row=r, column=c, sticky='w')
+            c += 1
 
         # ARP Settings
         r += 1
-        tk.Label(self, text='[ARP Settings]', fg='blue').grid(row=r, columnspan=3, sticky='w')
+        tk.Label(self, text='[ARP Settings]', fg='blue').grid(row=r, columnspan=4, sticky='w')
         r += 1
         tk.Label(self, text='Mode:').grid(row=r, column=0, sticky='e')
         self.arp_mode = tk.StringVar(value='pair')
@@ -82,14 +79,14 @@ class MitmGui(tk.Frame):
         self.arp_victims = tk.Entry(self)
         self.arp_victims.grid(row=r, column=1, sticky='ew')
         self.victims_mac_label = tk.Label(self, text='')
-        self.victims_mac_label.grid(row=r, column=2)
+        self.victims_mac_label.grid(row=r, column=2, columnspan=2, sticky='w')
 
         r += 1
         tk.Label(self, text='Gateway IP:').grid(row=r, column=0, sticky='e')
         self.arp_gateway = tk.Entry(self)
         self.arp_gateway.grid(row=r, column=1, sticky='ew')
         self.gateway_mac_label = tk.Label(self, text='')
-        self.gateway_mac_label.grid(row=r, column=2)
+        self.gateway_mac_label.grid(row=r, column=2, columnspan=2, sticky='w')
 
         r += 1
         tk.Label(self, text='CIDR:').grid(row=r, column=0, sticky='e')
@@ -103,7 +100,7 @@ class MitmGui(tk.Frame):
 
         # DNS Settings
         r += 1
-        tk.Label(self, text='[DNS Settings]', fg='blue').grid(row=r, columnspan=3, sticky='w')
+        tk.Label(self, text='[DNS Settings]', fg='blue').grid(row=r, columnspan=4, sticky='w')
         r += 1
         tk.Label(self, text='Mapping file:').grid(row=r, column=0, sticky='e')
         self.map_path = tk.Entry(self)
@@ -112,7 +109,7 @@ class MitmGui(tk.Frame):
 
         r += 1
         self.relay_var = tk.BooleanVar()
-        tk.Checkbutton(self, text='Relay unmatched DNS', variable=self.relay_var).grid(row=r, columnspan=3, sticky='w')
+        tk.Checkbutton(self, text='Relay unmatched DNS', variable=self.relay_var).grid(row=r, columnspan=4, sticky='w')
 
         r += 1
         tk.Label(self, text='Upstream DNS:').grid(row=r, column=0, sticky='e')
@@ -142,17 +139,19 @@ class MitmGui(tk.Frame):
 
         # Log output
         r += 1
-        tk.Label(self, text='Log output:').grid(row=r, columnspan=3, sticky='w')
+        tk.Label(self, text='Log output:').grid(row=r, columnspan=4, sticky='w')
         r += 1
         self.rowconfigure(r, weight=1)
         self.log_text = tk.Text(self)
-        self.log_text.grid(row=r, column=0, columnspan=3, sticky='nsew')
+        self.log_text.grid(row=r, column=0, columnspan=4, sticky='nsew')
 
     def _bind_events(self):
         self.arp_mode.trace('w', lambda *args: self._toggle_arp_fields())
         self.arp_victims.bind('<FocusOut>', lambda e: self._resolve_mac(self.arp_victims, self.victims_mac_label))
         self.arp_gateway.bind('<FocusOut>', lambda e: self._resolve_mac(self.arp_gateway, self.gateway_mac_label))
+        self.run_mode.trace('w', lambda *args: self._toggle_sections())
         self._toggle_arp_fields()
+        self._toggle_sections()
 
     def _toggle_arp_fields(self):
         mode = self.arp_mode.get()
@@ -160,6 +159,19 @@ class MitmGui(tk.Frame):
         self.arp_victims.config(state='normal' if is_pair else 'disabled')
         self.arp_gateway.config(state='normal' if is_pair else 'disabled')
         self.arp_cidr.config(state='normal' if mode == 'flood' else 'disabled')
+
+    def _toggle_sections(self):
+        rm = self.run_mode.get()
+        arp_widgets = [self.arp_mode, self.arp_victims, self.arp_gateway, self.arp_cidr, self.arp_interval]
+        dns_widgets = [self.map_path, self.relay_var, self.upstream, self.ttl, self.bpf]
+        if rm == 'arp':
+            for w in arp_widgets: w.config(state='normal')
+            for w in dns_widgets: w.config(state='disabled')
+        elif rm == 'dns':
+            for w in arp_widgets: w.config(state='disabled')
+            for w in dns_widgets: w.config(state='normal')
+        else:
+            for w in arp_widgets + dns_widgets: w.config(state='normal')
 
     def _resolve_mac(self, entry, label):
         ip = entry.get().strip()
@@ -193,7 +205,8 @@ class MitmGui(tk.Frame):
 
         iface = self.iface_var.get().strip()
         if not iface:
-            messagebox.showerror('Error', 'Select interface'); return
+            messagebox.showerror('Error', 'Select interface')
+            return
 
         # ARP validation and launch
         mode = self.arp_mode.get()
@@ -220,11 +233,12 @@ class MitmGui(tk.Frame):
                 self.arp_mgr.add(thr)
             self.logger.info('ARP mode %s initiated', mode)
         except Exception as e:
-            messagebox.showerror('ARP Error', str(e)); return
+            messagebox.showerror('ARP Error', str(e))
+            return
 
         # DNS launch if mapping provided
         mapping_file = self.map_path.get().strip()
-        if mapping_file:
+        if mapping_file and self.run_mode.get() in ('dns','both'):
             try:
                 mapping = load_mapping(mapping_file)
                 dns_thr = DNSSpoofer(iface=iface, mapping=mapping,
@@ -233,7 +247,8 @@ class MitmGui(tk.Frame):
                 dns_thr.start()
                 self.logger.info('DNS spoof started')
             except Exception as e:
-                messagebox.showerror('DNS Error', str(e)); return
+                messagebox.showerror('DNS Error', str(e))
+                return
 
         self.start_btn.config(state='disabled')
         self.stop_btn.config(state='normal')
