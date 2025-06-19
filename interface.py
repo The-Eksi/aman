@@ -23,6 +23,7 @@ class ArpSpoofUI(tk.Tk):
         self.mode_var = tk.StringVar(value='pair')
         self.mode_combo = ttk.Combobox(self, textvariable=self.mode_var, values=['pair', 'silent', 'flood'])
         self.mode_combo.grid(row=1, column=1, padx=5, pady=5)
+        self.mode_combo.bind('<<ComboboxSelected>>', self.on_mode_change)
 
         # Victims entry
         tk.Label(self, text="Victims (CSV):").grid(row=2, column=0, sticky='e')
@@ -58,33 +59,78 @@ class ArpSpoofUI(tk.Tk):
         scrollbar.grid(row=7, column=2, sticky='nsew')
         self.log_text['yscrollcommand'] = scrollbar.set
 
-    def start_attack(self):
-        args = ['sudo', 'python2', 'arp_poisoner27.py', '--iface', self.iface_var.get(), '--mode', self.mode_var.get(), '--interval', self.interval_entry.get()]
+        # initialize field states
+        self.on_mode_change()
+
+    def on_mode_change(self, event=None):
         mode = self.mode_var.get()
         if mode in ('pair', 'silent'):
-            args += ['--victims', self.victims_entry.get(), '--gateway', self.gateway_entry.get()]
-        elif mode == 'flood':
-            args += ['--cidr', self.cidr_entry.get(), '--gateway', self.gateway_entry.get()]
+            self.victims_entry.config(state='normal')
+            self.gateway_entry.config(state='normal')
+            self.cidr_entry.config(state='disabled')
+        else:  # flood
+            self.victims_entry.config(state='disabled')
+            self.gateway_entry.config(state='normal')
+            self.cidr_entry.config(state='normal')
 
-        self.log_text.insert(tk.END, "Starting: {}\n".format(' '.join(args)))
+    def start_attack(self):
+        # validate inputs
+        iface = self.iface_var.get().strip()
+        mode = self.mode_var.get()
+        interval = self.interval_entry.get().strip()
+        gateway = self.gateway_entry.get().strip()
+        victims = self.victims_entry.get().strip()
+        cidr = self.cidr_entry.get().strip()
+
+        if not iface:
+            self._log("Error: Interface not selected.\n")
+            return
+        if mode in ('pair', 'silent') and (not victims or not gateway):
+            self._log("Error: Victims and Gateway are required for this mode.\n")
+            return
+        if mode == 'flood' and (not cidr or not gateway):
+            self._log("Error: CIDR and Gateway are required for flood mode.\n")
+            return
+
+        args = ['sudo', 'python2', 'arp_poisoner27.py', '--iface', iface, '--mode', mode, '--interval', interval]
+        if mode in ('pair', 'silent'):
+            args += ['--victims', victims, '--gateway', gateway]
+        else:
+            args += ['--cidr', cidr, '--gateway', gateway]
+
+        self._log("Starting: {}\n".format(' '.join(args)))
         self.start_btn.config(state='disabled')
         self.stop_btn.config(state='normal')
 
-        def run():
+        def run_process():
             self.process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-            for line in self.process.stdout:
-                self.log_text.insert(tk.END, line)
-                self.log_text.see(tk.END)
+            while True:
+                line = self.process.stdout.readline()
+                if not line:
+                    break
+                self._log(line)
+            self._on_process_end()
 
-        threading.Thread(target=run, daemon=True).start()
+        thread = threading.Thread(target=run_process)
+        thread.setDaemon(True)
+        thread.start()
+
+    def _on_process_end(self):
+        self._log("\nProcess ended.\n")
+        self.start_btn.config(state='normal')
+        self.stop_btn.config(state='disabled')
+        self.process = None
 
     def stop_attack(self):
         if self.process:
             self.process.terminate()
-            self.log_text.insert(tk.END, "\nAttack stopped. Restoring caches...\n")
-            self.process = None
+            self._log("\nAttack stopped. Restoring caches...\n")
         self.start_btn.config(state='normal')
         self.stop_btn.config(state='disabled')
+
+    def _log(self, message):
+        self.log_text.insert(tk.END, message)
+        self.log_text.see(tk.END)
 
 if __name__ == '__main__':
     app = ArpSpoofUI()
