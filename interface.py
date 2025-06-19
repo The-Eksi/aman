@@ -58,7 +58,9 @@ class SSLStripUI(tk.Tk):
         if not iface:
             self._log("Error: Interface must be selected.\n")
             return
-        args = ['sudo', 'python2', 'ssl.py', '-i', iface, '--bpf', bpf]
+
+        # Build command for sslpro.py
+        args = ['sudo', 'python2', 'sslpro.py', '-i', iface, '--bpf', bpf]
         if hosts:
             args += ['--hosts', hosts]
         if verbose:
