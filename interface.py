@@ -14,11 +14,15 @@ try:
 except ImportError:
     sys.exit('Tkinter not found; install python-tk')
 
-# Ensure dnspro.py is importable
 import os
+import sys as _sys
+import logging
+from scapy.all import get_if_list
+
+# Ensure dnspro.py is importable
 script_dir = os.path.dirname(os.path.abspath(__file__))
-if script_dir not in sys.path:
-    sys.path.insert(0, script_dir)
+if script_dir not in _sys.path:
+    _sys.path.insert(0, script_dir)
 
 # Import the CLI spoofer module
 try:
@@ -27,13 +31,11 @@ try:
     DNSSpoofer = dns_mod.DNSSpoofer
     load_mapping = dns_mod.load_mapping
 except Exception as e:
+    tk.Tk().withdraw()
     messagebox.showerror('Import Error', 'Failed to load dnspro.py: %s' % e)
-    sys.exit(1)
+    _sys.exit(1)
 
-# Scapy interface enumeration
-from scapy.all import get_if_list
-import logging
-
+# Main GUI
 class GUIHandler(logging.Handler):
     def __init__(self, text_widget):
         logging.Handler.__init__(self)
@@ -50,7 +52,11 @@ class DNSGui(tk.Frame):
         tk.Frame.__init__(self, master)
         master.title('DNS Spoofer GUI')
         self.spoofer = None
+        self.log_handler = None
         self._build_widgets()
+        # Set up logging once
+        self.logger = logging.getLogger()
+        self.logger.setLevel(logging.INFO)
 
     def _build_widgets(self):
         row = 0
@@ -89,8 +95,7 @@ class DNSGui(tk.Frame):
 
         row += 1
         tk.Label(self, text='Log level:').grid(row=row, column=0, sticky='e')
-        self.log_level = tk.StringVar()
-        self.log_level.set('INFO')
+        self.log_level = tk.StringVar(value='INFO')
         tk.OptionMenu(self, self.log_level, 'DEBUG', 'INFO', 'ERROR').grid(row=row, column=1, sticky='w')
 
         row += 1
@@ -114,6 +119,19 @@ class DNSGui(tk.Frame):
             self.map_path.insert(0, path)
 
     def _start(self):
+        # prevent duplicate handlers
+        if self.log_handler:
+            self.logger.removeHandler(self.log_handler)
+        # clear log text
+        self.log_text.delete('1.0', tk.END)
+        # set level
+        level = getattr(logging, self.log_level.get(), logging.INFO)
+        self.logger.setLevel(level)
+        # add handler
+        self.log_handler = GUIHandler(self.log_text)
+        self.log_handler.setFormatter(logging.Formatter('%(asctime)s %(message)s'))
+        self.logger.addHandler(self.log_handler)
+
         iface = self.iface_var.get()
         if not iface:
             messagebox.showerror('Error','Select an interface')
@@ -125,25 +143,20 @@ class DNSGui(tk.Frame):
         try:
             mapping = load_mapping(mapfile)
         except Exception as e:
-            messagebox.showerror('Mapping Error', str(e))
-            return
-        level = getattr(logging, self.log_level.get(), logging.INFO)
-        logging.basicConfig(level=level, format='%(asctime)s %(message)s')
-        handler = GUIHandler(self.log_text)
-        handler.setFormatter(logging.Formatter('%(asctime)s %(message)s'))
-        logging.getLogger().addHandler(handler)
+            messagebox.showerror('Mapping Error', str(e)); return
+
         self.spoofer = DNSSpoofer(iface=iface, mapping=mapping,
                                   upstream=self.upstream.get(), relay=self.relay_var.get(),
                                   ttl=int(self.ttl.get()), bpf=self.bpf.get() or None)
         self.spoofer.start()
         self.start_btn.config(state='disabled')
         self.stop_btn.config(state='normal')
-        logging.info('Started on %s', iface)
+        self.logger.info('Started on %s', iface)
 
     def _stop(self):
         if self.spoofer:
             self.spoofer.stop()
-            logging.info('Stopping')
+            self.logger.info('Stopping')
             self.spoofer = None
         self.start_btn.config(state='normal')
         self.stop_btn.config(state='disabled')
