@@ -163,7 +163,14 @@ class DNSGui(tk.Frame):
         self.spoofer=DNSSpoofer(iface=iface,mapping=m,upstream=self.upstream.get(),relay=self.relay_var.get(),ttl=int(self.ttl.get()),bpf=self.bpf.get())
         self.spoofer.start()
         self.start_btn.config(state='disabled'); self.stop_btn.config(state='normal')
-        self.logger.info('Started on %s',iface)
+        # Display configuration to user
+        self.logger.info('Configuration:')
+        self.logger.info('  BPF filter: %s', self.bpf.get())
+        self.logger.info('  TTL: %s seconds', self.ttl.get())
+        self.logger.info('  Relay unmatched: %s', self.relay_var.get())
+        self.logger.info('  Upstream DNS: %s', self.upstream.get())
+        self.logger.info('  Log level: %s', self.log_level.get())
+        self.logger.info('Started on %s', iface)
 
     def _stop(self):
         if self.spoofer:
