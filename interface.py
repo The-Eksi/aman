@@ -126,13 +126,31 @@ class DNSGui(tk.Frame):
             self.map_path.delete(0, tk.END)
             self.map_path.insert(0, path)
 
-    def _choose_bpf(self):
-        choice = simpledialog.askstring('BPF Presets',
-            'Select or edit filter:',
-            initialvalue=self.bpf.get())
-        if choice:
+        def _choose_bpf(self):
+        # Open a small dialog to pick from presets or enter custom filter
+        dlg = tk.Toplevel(self)
+        dlg.title('Select BPF Preset')
+        tk.Label(dlg, text='Double-click a preset to select it or edit below:').pack(padx=10, pady=(10,0))
+        lb = tk.Listbox(dlg, height=len(self.BPF_PRESETS), width=40)
+        for p in self.BPF_PRESETS:
+            lb.insert(tk.END, p)
+        lb.pack(padx=10, pady=5)
+        entry = tk.Entry(dlg, width=40)
+        entry.insert(0, self.bpf.get())
+        entry.pack(padx=10, pady=(0,10))
+        button_frame = tk.Frame(dlg)
+        button_frame.pack(pady=(0,10))
+        def on_select(evt):
+            sel = lb.get(lb.curselection())
+            entry.delete(0, tk.END)
+            entry.insert(0, sel)
+        lb.bind('<Double-Button-1>', on_select)
+        def on_ok():
             self.bpf.delete(0, tk.END)
-            self.bpf.insert(0, choice)
+            self.bpf.insert(0, entry.get())
+            dlg.destroy()
+        tk.Button(button_frame, text='OK', command=on_ok).pack(side='left', padx=5)
+        tk.Button(button_frame, text='Cancel', command=dlg.destroy).pack(side='left')
 
     def _start(self):
         if self.log_handler:
