@@ -7,7 +7,8 @@ from scapy.all import get_if_list
 
 class SSLStripUI(tk.Tk):
     def __init__(self):
-        super(SSLStripUI, self).__init__()
+        # Initialize base Tk class
+        tk.Tk.__init__(self)
         self.title("SSL Strip Tool UI")
         self.process = None
 
